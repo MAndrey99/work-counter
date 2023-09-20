@@ -5,10 +5,10 @@ import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
-import org.eclipse.jgit.diff.DiffEntry;
-import org.eclipse.jgit.diff.DiffFormatter;
-import org.eclipse.jgit.diff.RawTextComparator;
+import org.eclipse.jgit.diff.*;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
+import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevTree;
@@ -17,20 +17,25 @@ import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.util.io.DisabledOutputStream;
+import ru.protei.analytics.ChangesStat;
+import ru.protei.analytics.CombinatedChangesStat;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Slf4j
 public class RepoChangesReader {
     private final Repository repository;
+    private final String repoName;
     private boolean pullRequired = false;
 
     public RepoChangesReader(@NonNull String repoName, Path repositoriesRoot) throws IOException {
+        this.repoName = repoName;
         FileRepositoryBuilder builder = new FileRepositoryBuilder();
         var repoPath = repositoriesRoot.resolve(repoName);
         var repoDir = repoPath.toFile();
@@ -52,13 +57,13 @@ public class RepoChangesReader {
                                              ZonedDateTime to) throws GitAPIException, IOException {
         try (Git git = new Git(repository)) {
             if (pullRequired) {
-                log.info("Pulling changes from remote repository");
+                log.info("Pulling changes from remote repository {}...", repoName);
                 git.pull().call();
                 log.info("Changes pulled successfully");
             }
 
             List<ChangesStat> commits = getCommitsByDate(git, authors, from, to);
-            log.info("Found {} commits", commits.size());
+            log.info("Found {} commits in repository {}", commits.size(), repoName);
             log.debug("Commits: {}", commits);
             return new CombinatedChangesStat(commits);
         }
@@ -75,8 +80,8 @@ public class RepoChangesReader {
             long startTime = from.toEpochSecond();
             long endTime = (to == null) ? Long.MAX_VALUE : to.toEpochSecond();
 
-            // Проход по всем коммитам
-            Iterable<RevCommit> logs = git.log().all().call();  // TODO: индексировать это как-то
+            // Проход по всем коммитам TODO: ориентироваться бы на какой-то интервал
+            Iterable<RevCommit> logs = git.log().all().call();
             for (RevCommit rev : logs) {
                 walk.parseBody(rev);
                 long commitTime = rev.getCommitTime(); // время в формате UNIX timestamp
@@ -88,14 +93,16 @@ public class RepoChangesReader {
                 }
             }
 
-            return selectedCommits.stream()
+            var result = selectedCommits.stream()
                     .map(commit -> getCommitStat(walk, commit))
                     .collect(Collectors.toList());
+            fillBranches(result);
+            return new ArrayList<>(result);
         }
     }
 
     @SneakyThrows
-    private ChangesStat getCommitStat(RevWalk revWalk, RevCommit commit) {
+    private CommitChangesStat getCommitStat(RevWalk revWalk, RevCommit commit) {
         List<DiffEntry> commitChanges = getCommitChanges(revWalk, commit);
         Set<String> authors = Set.of(commit.getAuthorIdent().getName());
         Set<String> changedFiles = commitChanges.stream()
@@ -103,7 +110,49 @@ public class RepoChangesReader {
                 .collect(Collectors.toSet());
         ZonedDateTime commitDateTime = ZonedDateTime.ofInstant(
                 commit.getAuthorIdent().getWhen().toInstant(), ZoneId.systemDefault());
-        return new ChangesStatData(commitDateTime, changedFiles.size(), changedFiles, authors);
+
+        int changesCount = 0;
+        DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
+        diffFormatter.setRepository(repository);
+        for (DiffEntry diffEntry : commitChanges) {
+            EditList editList = diffFormatter.toFileHeader(diffEntry).toEditList();
+            for (Edit edit : editList) {
+                changesCount += edit.getLengthA(); // Удаленные строки
+                changesCount += edit.getLengthB(); // Добавленные строки
+                // TODO: а при перемещении файла проблем не возникнет?
+            }
+        }
+
+        return new CommitChangesStat(commitDateTime, changesCount,
+                changedFiles, authors, new HashSet<>(), commit.getId());
+    }
+
+    public void fillBranches(List<CommitChangesStat> commitChangesStatList) throws IOException, GitAPIException {
+        // TODO: бывают ситуации когда ветка вмерджина в мастер и поэтому коммит есть во многих ветках
+        //     надо бы как-то понять, что он принадлежит ветке, которую мерджили в мастер
+
+        Map<ObjectId, CommitChangesStat> commitIdToChangesStatData = commitChangesStatList.stream()
+                .collect(Collectors.toMap(CommitChangesStat::getCommitId, Function.identity()));
+        try (Git git = new Git(repository)) {
+            List<Ref> branches = git.branchList().call();
+            for (Ref branch : branches) {
+                RevCommit latestCommitOnBranch = repository.parseCommit(branch.getObjectId());
+                Iterable<RevCommit> commits = git.log().add(latestCommitOnBranch).call();
+                for (RevCommit c : commits) {
+                    // TODO: тут тоже бы не проходить все коммиты, а ориентироваться
+                    //  на какой-то интервал или пограничные коммиты
+                    CommitChangesStat commitChangesStat = commitIdToChangesStatData.get(c.getId());
+                    if (commitChangesStat != null) {
+                        String shortName = branch.getName().replace("refs/heads/", "");
+                        commitChangesStat.getBranches().add(shortName);
+                    }
+                }
+            }
+        }
+
+        for (CommitChangesStat commitChangesStat : commitChangesStatList) {
+            log.warn("Commit {} has no branches ({})", commitChangesStat.getCommitId(), repoName);
+        }
     }
 
     private List<DiffEntry> getCommitChanges(RevWalk walk, RevCommit commit) throws IOException {
