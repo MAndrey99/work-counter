@@ -128,13 +128,25 @@ public class RepoChangesReader {
     }
 
     public void fillBranches(List<CommitChangesStat> commitChangesStatList) throws IOException, GitAPIException {
-        // TODO: бывают ситуации когда ветка вмерджина в мастер и поэтому коммит есть во многих ветках
-        //     надо бы как-то понять, что он принадлежит ветке, которую мерджили в мастер
-
+        // TODO: не всегда определяется ветка
         Map<ObjectId, CommitChangesStat> commitIdToChangesStatData = commitChangesStatList.stream()
                 .collect(Collectors.toMap(CommitChangesStat::getCommitId, Function.identity()));
+        // тут собираем все коммиты являющиеся головами веток
+        Map<ObjectId, List<String>> heads = repository.getRefDatabase().getRefsByPrefix("refs/heads/").stream()
+                .map(ref -> Map.entry(ref.getObjectId(), ref.getName().replace("refs/heads/", "")))
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> Collections.singletonList(e.getValue()), (a, b) -> {
+                    List<String> result = new ArrayList<>(a.size() + b.size());
+                    result.addAll(a);
+                    result.addAll(b);
+                    return result;
+                }));
+
+        // заполняем коммиты хранящиеся в каждой ветке
+        Map<String, Set<ObjectId>> branchToCommits = new HashMap<>();
         try (Git git = new Git(repository)) {
             List<Ref> branches = git.branchList().call();
+            log.info("Found {} branches in repository {}: {}", branches.size(), repoName,
+                    branches.stream().map(Ref::getName).collect(Collectors.toList()));
             for (Ref branch : branches) {
                 RevCommit latestCommitOnBranch = repository.parseCommit(branch.getObjectId());
                 Iterable<RevCommit> commits = git.log().add(latestCommitOnBranch).call();
@@ -144,14 +156,47 @@ public class RepoChangesReader {
                     CommitChangesStat commitChangesStat = commitIdToChangesStatData.get(c.getId());
                     if (commitChangesStat != null) {
                         String shortName = branch.getName().replace("refs/heads/", "");
-                        commitChangesStat.getBranches().add(shortName);
+                        branchToCommits.computeIfAbsent(shortName, k -> new HashSet<>()).add(c.getId());
                     }
+                }
+            }
+        }
+
+        // если ветка содержит коммит из heads, значит далее надо игнорировать все коммиты той ветки в рамках более общей
+        removeInnerBranches(branchToCommits, heads);
+
+        // непосредственно заполнение веток в commitIdToChangesStatData
+        for (var entry : branchToCommits.entrySet()) {
+            String branchName = entry.getKey();
+            Set<ObjectId> commits = entry.getValue();
+            for (ObjectId commitId : commits) {
+                CommitChangesStat commitChangesStat = commitIdToChangesStatData.get(commitId);
+                if (commitChangesStat != null) {
+                    commitChangesStat.getBranches().add(branchName);
                 }
             }
         }
 
         for (CommitChangesStat commitChangesStat : commitChangesStatList) {
             log.warn("Commit {} has no branches ({})", commitChangesStat.getCommitId(), repoName);
+        }
+    }
+
+    private void removeInnerBranches(Map<String, Set<ObjectId>> branchToCommits, Map<ObjectId, List<String>> heads) {
+        for (var entry : branchToCommits.entrySet()) {
+            String branchName = entry.getKey();
+            Set<ObjectId> commits = entry.getValue();
+            Set<ObjectId> updatedCommits = new HashSet<>(commits);
+            for (ObjectId commitId : commits) {
+                var branches = heads.getOrDefault(commitId, Collections.emptyList());
+                if (!branches.contains(branchName)) {
+                    for (var b : branches) {
+                        // удаляем все коммиты ветки {b} из {branchName}
+                        updatedCommits.removeAll(branchToCommits.getOrDefault(b, Collections.emptySet()));
+                    }
+                }
+            }
+            branchToCommits.put(branchName, updatedCommits);
         }
     }
 

@@ -48,6 +48,9 @@ public class ActivityAnalyzer {
                                 .filter(branch -> !branch.contains("master"))
                                 .collect(Collectors.toSet());
                     }
+                    if (branches.isEmpty()) {
+                        log.warn("Not Found branches for changes at {}", changesStat.getFrom());
+                    }
                     String branch = branches.size() == 1 ? branches.iterator().next() : "unknown";
                     dailyActivity.addActivity(branch, changesStat.getLinesChanged());
                 }
