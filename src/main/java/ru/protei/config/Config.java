@@ -52,7 +52,7 @@ public class Config {
     private static String getRequiredProperty(Properties properties, String propertyName) throws ConfigurationException {
         String property = properties.getProperty(propertyName);
         if (property == null) {
-            throw new ConfigurationException(String.format("Property %s is not specified", propertyName));
+            throw new ConfigurationException(STR."Property \{propertyName} is not specified");
         }
         return property;
     }

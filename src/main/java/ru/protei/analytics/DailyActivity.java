@@ -70,6 +70,7 @@ public class DailyActivity {
                 .collect(Collectors.toMap(Map.Entry::getKey, entry -> String.format("%dh", entry.getValue())));
     }
 
+    // TODO: почему не юзаем? Это нам не нужно, тогда надо удалить!
     public static int findClosestTimeSlot(List<Integer> timeSlots, float activityFraction, int remainingMinutes) {
         int targetTime = Math.round(remainingMinutes * activityFraction);
         return Collections.min(timeSlots, Comparator.comparingInt(slot -> Math.abs(slot - targetTime)));

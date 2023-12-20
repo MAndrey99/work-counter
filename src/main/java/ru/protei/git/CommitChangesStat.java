@@ -31,6 +31,6 @@ public class CommitChangesStat implements ChangesStat {
 
     @Override
     public String toString() {
-        return String.format("%s: %d lines changed in %d files by %s", time, linesChanged, changedFiles.size(), authors);
+        return STR."\{time}: \{linesChanged} lines changed in \{changedFiles.size()} files by \{authors}";
     }
 }

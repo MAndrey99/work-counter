@@ -1,6 +1,7 @@
 package ru.protei.git;
 
 import lombok.NonNull;
+import lombok.Setter;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.eclipse.jgit.api.Git;
@@ -32,7 +33,7 @@ import java.util.stream.Collectors;
 public class RepoChangesReader {
     private final Repository repository;
     private final String repoName;
-    private boolean pullRequired = false;
+    private @Setter boolean pullRequired = false;
 
     public RepoChangesReader(@NonNull String repoName, Path repositoriesRoot) throws IOException {
         this.repoName = repoName;
@@ -40,16 +41,12 @@ public class RepoChangesReader {
         var repoPath = repositoriesRoot.resolve(repoName);
         var repoDir = repoPath.toFile();
         if (!repoDir.isDirectory()) {
-            throw new IOException(String.format("Repository %s not found", repoName));
+            throw new IOException(STR."Repository \{repoName} not found");
         }
         repository = builder.setGitDir(repoPath.resolve(".git").toFile())
                 .readEnvironment() // scan environment GIT_* variables
                 .findGitDir() // scan up the file system tree
                 .build();
-    }
-
-    public void setPullRequired(boolean pullRequired) {
-        this.pullRequired = pullRequired;
     }
 
     public CombinatedChangesStat readChanges(@NonNull Collection<String> authors,
